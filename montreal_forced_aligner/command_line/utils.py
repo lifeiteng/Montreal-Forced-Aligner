@@ -458,7 +458,7 @@ def stop_server(mode: str = "smart") -> None:
         sys.exit(1)
     logger.info(f"Stopping the {GLOBAL_CONFIG.current_profile_name} MFA database server...")
     proc = subprocess.Popen(
-        ["pg_ctl", "-D", db_directory, "-m", mode, "stop"],
+        ["pg_ctl", "-D", db_directory, "stop"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=os.environ,
