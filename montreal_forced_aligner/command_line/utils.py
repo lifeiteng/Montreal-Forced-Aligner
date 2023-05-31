@@ -4,6 +4,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from montreal_forced_aligner.helper import mfa_open
 from montreal_forced_aligner.models import MODEL_TYPES
 
 __all__ = [
+    "cleanup_logger",
     "validate_acoustic_model",
     "validate_g2p_model",
     "validate_ivector_extractor",
@@ -101,6 +103,12 @@ def common_options(f: typing.Callable) -> typing.Callable:
             "-d/-nd",
             "debug",
             help=f"Run extra steps for debugging issues, default is {GLOBAL_CONFIG.debug}",
+            default=None,
+        ),
+        click.option(
+            "--use_postgres/--no_use_postgres",
+            "use_postgres",
+            help=f"Use postgres instead of sqlite for extra functionality, default is {GLOBAL_CONFIG.use_postgres}",
             default=None,
         ),
         click.option(
@@ -234,9 +242,7 @@ def configure_pg(directory):
         "#log_min_duration_statement = -1": "log_min_duration_statement = 5000",
         "#enable_partitionwise_join = off": "enable_partitionwise_join = on",
         "#enable_partitionwise_aggregate = off": "enable_partitionwise_aggregate = on",
-        "#unix_socket_directories = ''": f"unix_socket_directories = '{GLOBAL_CONFIG.database_socket}'",
-        "#unix_socket_directories = '/var/run/postgresql'": f"unix_socket_directories = '{GLOBAL_CONFIG.database_socket}'",
-        "#unix_socket_directories = '/tmp'": f"unix_socket_directories = '{GLOBAL_CONFIG.database_socket}'",
+        "#unix_socket_directories.*": f"unix_socket_directories = '{GLOBAL_CONFIG.database_socket}'",
         "#listen_addresses = 'localhost'": "listen_addresses = ''",
         "max_connections = 100": "max_connections = 1000",
     }
@@ -261,7 +267,7 @@ def configure_pg(directory):
     with mfa_open(directory.joinpath("postgresql.conf"), "r") as f:
         config = f.read()
     for query, rep in configuration_updates.items():
-        config = config.replace(query, rep)
+        config = re.sub(query, rep, config)
     with mfa_open(directory.joinpath("postgresql.conf"), "w") as f:
         f.write(config)
 
@@ -449,9 +455,6 @@ def stop_server(mode: str = "smart") -> None:
     db_directory = GLOBAL_CONFIG.root_temporary_directory.joinpath(
         f"pg_mfa_{GLOBAL_CONFIG.current_profile_name}"
     )
-    log_path = GLOBAL_CONFIG.root_temporary_directory.joinpath(
-        f"pg_log_{GLOBAL_CONFIG.current_profile_name}.txt"
-    )
     if not db_directory.exists():
 
         logger.error(f"There was no database found at {db_directory}.")
@@ -466,12 +469,8 @@ def stop_server(mode: str = "smart") -> None:
     )
     stdout, stderr = proc.communicate()
     if proc.returncode == 1:
-        logger.error(f"pg_ctl stdout: {stdout}")
-        logger.error(f"pg_ctl stderr: {stderr}")
-        raise DatabaseError(
-            f"There was an error encountered starting the {GLOBAL_CONFIG.current_profile_name} MFA database server, "
-            f"please see {log_path} for more details and/or look at the logged errors above."
-        )
+        logger.debug(f"pg_ctl stdout: {stdout}")
+        logger.debug(f"pg_ctl stderr: {stderr}")
     else:
         logger.debug(f"pg_ctl stdout: {stdout}")
         logger.debug(f"pg_ctl stderr: {stderr}")
