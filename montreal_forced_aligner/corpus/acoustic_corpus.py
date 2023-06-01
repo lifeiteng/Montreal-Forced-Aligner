@@ -80,6 +80,9 @@ __all__ = [
     "AcousticCorpusPronunciationMixin",
 ]
 
+formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
+logging.basicConfig(format=formatter, level=logging.INFO)
+
 logger = logging.getLogger("mfa")
 
 
