@@ -59,6 +59,13 @@ __all__ = ["g2p_cli"]
     help="Included words enclosed by brackets, job_name.e. [...], (...), <...>.",
     default=False,
 )
+@click.option(
+    "--strict_graphemes",
+    is_flag=True,
+    help="whether to be strict with missing graphemes and skip words containing new graphemes.",
+    default=False,
+)
+
 @common_options
 @click.help_option("-h", "--help")
 @click.pass_context

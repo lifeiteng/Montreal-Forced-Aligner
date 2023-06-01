@@ -458,6 +458,7 @@ class PyniniGenerator(G2PTopLevelMixin):
     """
 
     def __init__(self, g2p_model_path: Path = None, strict_graphemes: bool = False, **kwargs):
+        logger.info(f"G2P strict_graphemes={strict_graphemes}")
         self.strict_graphemes = strict_graphemes
         super().__init__(**kwargs)
         self.g2p_model = G2PModel(
