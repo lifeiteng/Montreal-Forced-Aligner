@@ -6,6 +6,7 @@ from pathlib import Path
 
 import rich_click as click
 import yaml
+import torch
 
 from montreal_forced_aligner.alignment import PretrainedAligner
 from montreal_forced_aligner.command_line.utils import (
@@ -19,6 +20,14 @@ from montreal_forced_aligner.helper import mfa_open
 
 __all__ = ["align_corpus_cli"]
 
+
+# Torch's multithreaded behavior needs to be disabled or
+# it wastes a lot of CPU and slow things down.
+# Do this outside of main() in case it needs to take effect
+# even when we are not invoking the main (e.g. when spawning subprocesses).
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 @click.command(
     name="align",

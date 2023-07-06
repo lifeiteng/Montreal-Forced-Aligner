@@ -20,10 +20,12 @@ from pathlib import Path
 from queue import Empty
 from typing import TYPE_CHECKING, Dict, List, Union
 
+import kaldi_io
 import numpy as np
 import pynini
 import pywrapfst
 import sqlalchemy
+import torch
 from pynini.lib import rewrite
 from sqlalchemy.orm import Session, joinedload, selectinload, subqueryload
 
@@ -1584,6 +1586,7 @@ class PhoneConfidenceFunction(KaldiFunction):
         self.phone_pdf_counts_path = args.phone_pdf_counts_path
         self.feature_strings = args.feature_strings
 
+    @torch.no_grad()
     def _run(self) -> typing.Generator[typing.Tuple[int, str]]:
         """Run the function"""
         with Session(self.db_engine()) as session:
@@ -1601,18 +1604,39 @@ class PhoneConfidenceFunction(KaldiFunction):
 
         with mfa_open(self.phone_pdf_counts_path, "r") as f:
             data = json.load(f)
+
+        max_pdf_id = 0
         phone_pdf_mapping = collections.defaultdict(collections.Counter)
         for phone, pdf_counts in data.items():
             phone = split_phone_position(phone)[0]
             for pdf, count in pdf_counts.items():
                 phone_pdf_mapping[phone][int(pdf)] += count
+            max_pdf_id = max(max_pdf_id, max([x for x in phone_pdf_mapping[phone].keys()]))
         phones = {p: i for i, p in enumerate(sorted(phone_pdf_mapping.keys()))}
         reversed_phones = {k: v for v, k in phones.items()}
 
+        logger.info(f"max_pdf_id = {max_pdf_id} num_phones {len(phones)}")
+        phone_pdf_weights = np.zeros((max_pdf_id + 1, len(phones)), dtype=np.float32)
         for phone, pdf_counts in phone_pdf_mapping.items():
             phone_total = sum(pdf_counts.values())
             for pdf, count in pdf_counts.items():
                 phone_pdf_mapping[phone][int(pdf)] = count / phone_total
+                phone_pdf_weights[int(pdf), phones[phone]] = count / phone_total
+
+        device = "cuda:0"
+        # device = "cpu"
+        if "cuda" in device:
+            phone_pdf_weights = torch.tensor(phone_pdf_weights,
+                                             dtype=torch.float32,
+                                             device=device,
+                                             requires_grad=False)
+
+        phone_pdfs = {}
+        phone_weights = {}
+        for i, p in reversed_phones.items():
+            phone_pdfs[p] = [x for x in phone_pdf_mapping[p].keys()]
+            weight = np.array([x for x in phone_pdf_mapping[p].values()])
+            phone_weights[p] = weight
 
         with mfa_open(self.log_path, "w") as log_file:
             for dict_id in self.feature_strings.keys():
@@ -1622,7 +1646,7 @@ class PhoneConfidenceFunction(KaldiFunction):
                         thirdparty_binary("gmm-compute-likes"),
                         self.model_path,
                         feature_string,
-                        "ark,t:-",
+                        "ark:-",
                     ],
                     stderr=log_file,
                     stdout=subprocess.PIPE,
@@ -1630,17 +1654,40 @@ class PhoneConfidenceFunction(KaldiFunction):
                 )
                 interval_mappings = []
                 new_interval_mappings = []
-                for utterance_id, likelihoods in read_feats(output_proc):
+
+                check_unique = set()
+ 
+                for utterance_id, likelihoods in kaldi_io.read_mat_ark(output_proc.stdout):
+                    utterance_id = int(utterance_id.split("-")[-1])
+                    assert utterance_id not in check_unique, (utterance_id, check_unique)
+                    check_unique.add(utterance_id)
+                    if "cuda" in device:
+                        likelihoods_tensor = torch.tensor(likelihoods,
+                                                          dtype=torch.float32,
+                                                          device=device,
+                                                          requires_grad=False)
+                        phone_likes = torch.matmul(likelihoods_tensor, phone_pdf_weights)
+                        top_phone_inds = torch.argmax(phone_likes, dim=1).cpu().numpy()
+                        phone_likes = phone_likes.cpu().numpy()
+                    else:
+                        phone_likes = np.dot(likelihoods, phone_pdf_weights)
+                        top_phone_inds = np.argmax(phone_likes, axis=1)
+
+                    if len(new_interval_mappings) < 4:  # verify
+                        _phone_likes = np.zeros((likelihoods.shape[0], len(phones)))
+                        for i, p in reversed_phones.items():
+                            like = likelihoods[:, phone_pdfs[p]]
+                            _phone_likes[:, i] = np.dot(like, phone_weights[p])
+                        max_diff = np.abs(phone_likes - _phone_likes).max()
+                        assert max_diff < 0.01, (max_diff)
+
                     phone_likes = np.zeros((likelihoods.shape[0], len(phones)))
-                    for i, p in reversed_phones.items():
-                        like = likelihoods[:, [x for x in phone_pdf_mapping[p].keys()]]
-                        weight = np.array([x for x in phone_pdf_mapping[p].values()])
-                        phone_likes[:, i] = np.dot(like, weight)
                     top_phone_inds = np.argmax(phone_likes, axis=1)
+
                     utt_begin, intervals = utterances[utterance_id]
                     for pi in intervals:
-                        if pi.phone.phone == "sil":
-                            continue
+                        # if pi.phone.phone == "sil":
+                        #     continue
                         frame_begin = int(((pi.begin - utt_begin) * 1000) / 10)
                         frame_end = int(((pi.end - utt_begin) * 1000) / 10)
                         if frame_begin == frame_end:
@@ -1654,12 +1701,10 @@ class PhoneConfidenceFunction(KaldiFunction):
                             alternate_label = reversed_phones[top_phone_ind]
                             alternate_label = split_phone_position(alternate_label)[0]
                             alternate_labels[alternate_label] += 1
-                            if alternate_label == pi.phone.phone:
-                                scores.append(0)
-                            else:
-                                actual_score = phone_likes[i, phones[pi.phone.phone]]
-                                scores.append(phone_likes[i, top_phone_ind] - actual_score)
-                        average_score = statistics.mean(scores)
+
+                            actual_score = phone_likes[i, phones[pi.phone.phone]]
+                            scores.append(phone_likes[i, top_phone_ind] - actual_score)
+                        average_score = float(statistics.mean(scores))
                         alternate_label = max(alternate_labels, key=lambda x: alternate_labels[x])
                         interval_mappings.append({"id": pi.id, "phone_goodness": average_score})
                         new_interval_mappings.append(
@@ -1670,6 +1715,7 @@ class PhoneConfidenceFunction(KaldiFunction):
                                 "phone_id": phone_mapping[alternate_label],
                             }
                         )
+
                     yield interval_mappings
                     interval_mappings = []
                 self.check_call(output_proc)
