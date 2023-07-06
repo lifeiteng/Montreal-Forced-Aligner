@@ -126,6 +126,9 @@ def split_phone_position(phone_label: str) -> List[str]:
     pos = None
     try:
         phone, pos = phone_label.rsplit("_", maxsplit=1)
+        # NOTE(Feiteng)  Stress or Tone
+        if pos in ["S0", "S1", "S2"] or "T" in pos:
+            phone = f"{phone}_{pos}"
     except ValueError:
         pass
     return phone, pos

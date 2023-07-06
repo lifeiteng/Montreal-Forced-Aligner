@@ -363,6 +363,7 @@ class CorpusAligner(AcousticCorpusPronunciationMixin, AlignMixin, FileExporterMi
                 logger.info("Performing second-pass alignment...")
                 self.align_utterances()
                 self.collect_alignments()
+                self.get_phone_confidences()
                 if self.use_phone_model:
                     self.transcribe(WorkflowType.phone_transcription)
                 elif self.fine_tune:

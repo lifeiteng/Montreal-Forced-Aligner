@@ -206,7 +206,7 @@ def construct_output_tiers(
         if cleanup_textgrids:
             word_intervals = word_intervals.filter(Word.word_type != WordType.silence)
         if utt.speaker.name not in data:
-            data[utt.speaker.name] = {"words": [], "phones": []}
+            data[utt.speaker.name] = {"words": [], "phones": [], "goodness": []}
             if include_original_text:
                 data[utt.speaker.name]["utterances"] = []
         actual_words = utt.normalized_text.split()
@@ -244,6 +244,9 @@ def construct_output_tiers(
             for pi in wi.phone_intervals:
                 data[utt.speaker.name]["phones"].append(
                     CtmInterval(pi.begin, pi.end, pi.phone.phone)
+                )
+                data[utt.speaker.name]["goodness"].append(
+                    CtmInterval(pi.begin, pi.end, str(pi.phone_goodness)[:4])
                 )
     return data
 
