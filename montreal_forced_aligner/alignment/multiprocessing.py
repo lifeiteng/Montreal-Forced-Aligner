@@ -1631,6 +1631,73 @@ class PhoneConfidenceFunction(KaldiFunction):
                                              device=device,
                                              requires_grad=False)
 
+        str_model_path = str(self.model_path).replace('.mdl', f'.mdl.{self.job_name}.txt')
+        # Parsing AmDiagGMM
+        gmm_proc = subprocess.Popen(
+            [
+                thirdparty_binary("gmm-copy"),
+                f"--binary=false",
+                self.model_path,
+                "-",
+            ],
+            # stderr=log_file,
+            stdout=subprocess.PIPE,
+            env=os.environ,
+            encoding="utf8",
+        )
+
+        found = False
+        am_diag_gmm = collections.defaultdict(lambda: {"gconsts": None,
+                                                        "weights": None,
+                                                        "means_invvars": None,
+                                                        "inv_vars": None})
+        DIMENSION = 40
+        pdf_id = 0
+        MATRIX_ROWS = []
+
+        for line in gmm_proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("<DIMENSION> "):
+                # <DIMENSION> 40 <NUMPDFS> 5560 <DiagGMM>
+                mm = re.match(r"<DIMENSION> (\d+) <NUMPDFS> (\d+) <DiagGMM>", line)
+                DIMENSION, num_pdfs = int(mm.group(1)), int(mm.group(2))
+                assert num_pdfs == max_pdf_id + 1
+                found = True
+                continue
+
+            if not found:
+                continue
+
+            if line == "<DiagGMM>":
+                pdf_id += 1
+                continue
+            elif line == "</DiagGMM>":
+                continue
+            elif line.startswith("<GCONSTS>"):
+                gconsts = [float(x) for x in line.strip().split()[2:-1]]
+                am_diag_gmm[pdf_id]["gconsts"] = torch.tensor(gconsts, dtype=torch.float32, device=device, requires_grad=False)
+            elif line.startswith("<WEIGHTS>"):
+                weights = [float(x) for x in line.strip().split()[2:-1]]
+                am_diag_gmm[pdf_id]["weights"] = torch.tensor(weights, dtype=torch.float32, device=device, requires_grad=False)
+            elif line.startswith("<MEANS_INVVARS>  ["):
+                MATRIX_ROWS = []
+            elif line.startswith("<INV_VARS>  ["):
+                MATRIX_ROWS = []
+            elif line.endswith(']'):
+                MATRIX_ROWS.append([float(x) for x in line.strip().split()[:-1]])
+                if am_diag_gmm[pdf_id]["means_invvars"] is None:
+                    am_diag_gmm[pdf_id]["means_invvars"] = torch.tensor(MATRIX_ROWS, dtype=torch.float32, device=device, requires_grad=False).permute(1, 0)
+                else:
+                    assert am_diag_gmm[pdf_id]["inv_vars"] is None
+                    am_diag_gmm[pdf_id]["inv_vars"] = torch.tensor(MATRIX_ROWS, dtype=torch.float32, device=device, requires_grad=False).permute(1, 0)
+            else:
+                MATRIX_ROWS.append([float(x) for x in line.strip().split()])
+        self.check_call(gmm_proc)
+
+        assert len(am_diag_gmm) == max_pdf_id + 1
+
         phone_pdfs = {}
         phone_weights = {}
         for i, p in reversed_phones.items():
@@ -1641,10 +1708,9 @@ class PhoneConfidenceFunction(KaldiFunction):
         with mfa_open(self.log_path, "w") as log_file:
             for dict_id in self.feature_strings.keys():
                 feature_string = self.feature_strings[dict_id]
-                output_proc = subprocess.Popen(
+                feature_proc = subprocess.Popen(
                     [
-                        thirdparty_binary("gmm-compute-likes"),
-                        self.model_path,
+                        thirdparty_binary("copy-matrix"),
                         feature_string,
                         "ark:-",
                     ],
@@ -1652,37 +1718,37 @@ class PhoneConfidenceFunction(KaldiFunction):
                     stdout=subprocess.PIPE,
                     env=os.environ,
                 )
+
                 interval_mappings = []
                 new_interval_mappings = []
-
                 check_unique = set()
  
-                for utterance_id, likelihoods in kaldi_io.read_mat_ark(output_proc.stdout):
+                for utterance_id, features in kaldi_io.read_mat_ark(feature_proc.stdout):
                     utterance_id = int(utterance_id.split("-")[-1])
                     assert utterance_id not in check_unique, (utterance_id, check_unique)
                     check_unique.add(utterance_id)
-                    if "cuda" in device:
-                        likelihoods_tensor = torch.tensor(likelihoods,
-                                                          dtype=torch.float32,
-                                                          device=device,
-                                                          requires_grad=False)
-                        phone_likes = torch.matmul(likelihoods_tensor, phone_pdf_weights)
-                        top_phone_inds = torch.argmax(phone_likes, dim=1).cpu().numpy()
-                        phone_likes = phone_likes.cpu().numpy()
-                    else:
-                        phone_likes = np.dot(likelihoods, phone_pdf_weights)
-                        top_phone_inds = np.argmax(phone_likes, axis=1)
 
-                    if len(new_interval_mappings) < 4:  # verify
-                        _phone_likes = np.zeros((likelihoods.shape[0], len(phones)))
-                        for i, p in reversed_phones.items():
-                            like = likelihoods[:, phone_pdfs[p]]
-                            _phone_likes[:, i] = np.dot(like, phone_weights[p])
-                        max_diff = np.abs(phone_likes - _phone_likes).max()
-                        assert max_diff < 0.01, (max_diff)
+                    # kaldi AmDiagGMM
+                    likelihoods = []
+                    data = torch.tensor(features,
+                                        dtype=torch.float32,
+                                        device=device,
+                                        requires_grad=False)
+                    data_sq = torch.square(data)
+                    for pdf_id in range(0, max_pdf_id + 1):
+                        diag_gmm = am_diag_gmm[pdf_id]
+                        loglikes = diag_gmm["gconsts"]
+                        loglikes = loglikes + torch.matmul(data, diag_gmm["means_invvars"])
+                        loglikes = loglikes - 0.5 * torch.matmul(data_sq, diag_gmm["inv_vars"])
+                        log_sum = torch.logsumexp(loglikes, dim=1)
 
-                    phone_likes = np.zeros((likelihoods.shape[0], len(phones)))
-                    top_phone_inds = np.argmax(phone_likes, axis=1)
+                        likelihoods.append(log_sum)
+
+                    likelihoods_tensor = torch.stack(likelihoods, dim=1)
+
+                    phone_likes = torch.matmul(likelihoods_tensor, phone_pdf_weights)
+                    top_phone_inds = torch.argmax(phone_likes, dim=1).cpu().numpy()
+                    phone_likes = phone_likes.cpu().numpy()
 
                     utt_begin, intervals = utterances[utterance_id]
                     for pi in intervals:
@@ -1718,7 +1784,7 @@ class PhoneConfidenceFunction(KaldiFunction):
 
                     yield interval_mappings
                     interval_mappings = []
-                self.check_call(output_proc)
+                self.check_call(feature_proc)
 
 
 class GeneratePronunciationsFunction(KaldiFunction):
