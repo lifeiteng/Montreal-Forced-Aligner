@@ -1698,6 +1698,7 @@ class PhoneConfidenceFunction(KaldiFunction):
                 job_done = self.model_path.parent / f"goodness.{job_id - 2}.done"
                 while not job_done.is_file():
                     time.sleep(60)
+                    # job_done = self.model_path.parent / f"goodness.{job_id - 2}.done"
                 time.sleep(60)
 
         phone_pdf_weights = torch.tensor(phone_pdf_weights,
@@ -1774,7 +1775,7 @@ class PhoneConfidenceFunction(KaldiFunction):
                         data_sq = torch.square(data)
 
                         # Pdf x Batch x Gaussians
-                        loglikes = gconsts + torch.matmul(data, means_invvars.to(_device))
+                        loglikes = gconsts.to(_device) + torch.matmul(data, means_invvars.to(_device))
                         loglikes = loglikes - 0.5 * torch.matmul(data_sq, inv_vars.to(_device))
                         likelihoods_tensor = torch.logsumexp(loglikes, dim=-1)  # Pdf x Batch
                         del loglikes

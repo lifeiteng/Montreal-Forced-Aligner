@@ -548,6 +548,11 @@ class PyniniGenerator(G2PTopLevelMixin):
                 if not w:
                     skipped_words += 1
                     continue
+                if not word.isalpha():
+                    logger.info(f"Skipping not alpha word: {word}!")
+                    skipped_words += 1
+                    continue
+
                 job_queue.put(w)
             logger.debug(
                 f"Skipping {skipped_words} words for containing the following graphemes: "
