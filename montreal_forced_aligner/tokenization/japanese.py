@@ -3,6 +3,9 @@ from __future__ import annotations
 import pathlib
 import re
 
+import numpy as np
+from kaldialign import align as kaldi_align
+
 try:
     import sudachipy
 
@@ -276,10 +279,29 @@ class JapaneseTokenizer:
             space_indices = [i for i, x in enumerate(new_text) if x == " "]
             new_text = [x for i, x in enumerate(new_text) if i not in space_indices]
             pronunciations = [x for i, x in enumerate(pronunciations) if i not in space_indices]
+
+        if True:
+            orig_text = "".join(text.split())
+            join_text = "".join(new_text)
+            lengths_cumsum = np.cumsum([len(word) for word in new_text])
+
+            EPSILON = "※"
+            ali = kaldi_align(orig_text, join_text, eps_symbol=EPSILON, sclite_mode=True)
+
+            ts, ns = 0, 0
+            for t, n in ali:
+                if t != EPSILON and n != EPSILON and t != n:
+                    c = np.searchsorted(lengths_cumsum, ns, side="right")
+                    cs = ns - (lengths_cumsum[c - 1] if c > 0 else 0)
+                    new_text[c] = new_text[c][:cs] + t + new_text[c][cs + 1 :]
+                if t != EPSILON:
+                    ts += 1
+                if n != EPSILON:
+                    ns += 1
+
         new_text = " ".join(new_text)
         pronunciations = " ".join(pronunciations)
         if self.ignore_case:
-            new_text = new_text.lower()
             pronunciations = pronunciations.lower()
         return new_text, pronunciations
 
